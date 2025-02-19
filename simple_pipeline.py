@@ -66,8 +66,9 @@ INTERFACE = "en0"
 WINDOW_SIZE = 20
 NUM_FEATURES = 42
 THRESHOLD = 0.5
-PREPROCESSOR_DIR = "models/preprocessing/"
-MODEL_WEIGHTS = "models/test_model/best_model.keras"
+PREPROCESSOR_DIR = "models/preprocessing"
+MODEL_WEIGHTS = "models/lstm_autoencoder/model.keras"
+OUTPUT_DIR = "live_detection"
 
 packet_queue = Queue(maxsize=0)
 ig_queue = Queue(maxsize=0)
@@ -88,6 +89,9 @@ def capture_packets(interface=INTERFACE):
 
 def detection_worker():
     logging.info("Initializing detection worker: loading preprocessor + model.")
+    # Create output directory if it doesn't exist
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
     preprocessor = SimpleFeatureEngineeringPreprocessor(load_state=PREPROCESSOR_DIR, window_size=WINDOW_SIZE)
     model_wrapper = SimpleLSTMAutoencoder(seq_length=WINDOW_SIZE, num_features=NUM_FEATURES)
     model_wrapper.load_weights(MODEL_WEIGHTS)
@@ -95,7 +99,7 @@ def detection_worker():
     logging.info(f"Detection worker loaded model weights from {MODEL_WEIGHTS}, threshold={THRESHOLD}")
 
     fieldnames = preprocessor.all_features + ["timestamp", "is_anomaly", "anomaly_score"]
-    live_csv = open("live_capture.csv", 'w', newline='')
+    live_csv = open(os.path.join(OUTPUT_DIR, "live_capture.csv"), 'w', newline='')
     writer_all = csv.DictWriter(live_csv, fieldnames=fieldnames)
     writer_all.writeheader()
 
@@ -152,6 +156,9 @@ def detection_worker():
 
 def ig_worker():
     logging.info("IG worker started. Will compute integrated gradients for anomalies.")
+    # Create output directory if it doesn't exist
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
     preprocessor = SimpleFeatureEngineeringPreprocessor(load_state=PREPROCESSOR_DIR, window_size=WINDOW_SIZE)
     model_wrapper = SimpleLSTMAutoencoder(seq_length=WINDOW_SIZE, num_features=NUM_FEATURES)
     model_wrapper.load_weights(MODEL_WEIGHTS)
@@ -161,7 +168,7 @@ def ig_worker():
         + ["timestamp", "is_anomaly", "anomaly_score"]
         + ["ig_positive", "ig_negative", "top_5_features", "ig_explanation"]
     )
-    ig_csv = open("anomalies_ig.csv", 'w', newline='')
+    ig_csv = open(os.path.join(OUTPUT_DIR, "anomalies_ig.csv"), 'w', newline='')
     writer_ig = csv.DictWriter(ig_csv, fieldnames=fieldnames)
     writer_ig.writeheader()
 

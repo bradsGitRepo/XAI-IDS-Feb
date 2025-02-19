@@ -135,10 +135,26 @@ def main():
     model.compile(optimizer="adam", loss="mse")
 
     # 5) Train with callbacks
-    best_model_path = os.path.join(args.save_dir, "best_model.h5")
+    best_model_h5_path = os.path.join(args.save_dir, "best_model.h5")
+    best_model_keras_path = os.path.join(args.save_dir, "best_model.keras")
+    
+    class DualFormatModelCheckpoint(tf.keras.callbacks.Callback):
+        def __init__(self, h5_path, keras_path):
+            super().__init__()
+            self.h5_path = h5_path
+            self.keras_path = keras_path
+            self.best_val_loss = float('inf')
+            
+        def on_epoch_end(self, epoch, logs=None):
+            val_loss = logs.get('val_loss')
+            if val_loss < self.best_val_loss:
+                self.best_val_loss = val_loss
+                self.model.save(self.h5_path, save_format='h5')
+                self.model.save(self.keras_path, save_format='keras')
+    
     callbacks = [
         EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True, verbose=1),
-        ModelCheckpoint(filepath=best_model_path, monitor="val_loss", save_best_only=True, verbose=1)
+        DualFormatModelCheckpoint(best_model_h5_path, best_model_keras_path)
     ]
 
     print("Starting training ...")
@@ -151,9 +167,9 @@ def main():
         shuffle=True
     )
 
-    # Reload best model
-    print(f"Loading best model from {best_model_path} ...")
-    model.load_weights(best_model_path)
+    # Reload best model (load from keras format as it's used in simple_pipeline.py)
+    print(f"Loading best model from {best_model_keras_path} ...")
+    model = tf.keras.models.load_model(best_model_keras_path)
 
     # Compute reconstruction errors on training set
     recon_train = model.predict(X_train, verbose=0)
