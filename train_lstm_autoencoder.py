@@ -59,51 +59,86 @@ import json
 from simple_model import SimpleLSTMAutoencoder
 
 def create_sequences(data: np.ndarray, seq_length: int):
-    ...
+    """
+    Split 2D data (num_samples, num_features) into 3D sequences (num_sequences, seq_length, num_features).
+    We also return an index array for mapping each 3D slice back to its "last row" index in the original data.
+    """
+    sequences = []
+    indexes = []
+    for i in range(len(data) - seq_length + 1):
+        seq = data[i : i + seq_length]
+        sequences.append(seq)
+        # We'll consider i+seq_length-1 as the "final row index" for this window
+        indexes.append(i + seq_length - 1)
+    return np.array(sequences, dtype=np.float32), np.array(indexes, dtype=np.int32)
 
 def print_error_summary(errors: np.ndarray, label="Set"):
-    ...
+    """
+    Print a summary of reconstruction errors: min, max, mean, percentiles.
+    """
+    min_err = np.min(errors)
+    max_err = np.max(errors)
+    mean_err = np.mean(errors)
+    p25 = np.percentile(errors, 25)
+    p50 = np.percentile(errors, 50)
+    p75 = np.percentile(errors, 75)
+    p90 = np.percentile(errors, 90)
+    p95 = np.percentile(errors, 95)
+    
+    print(f"\nReconstruction Error Summary ({label}):")
+    print(f"  Min: {min_err:.6f}")
+    print(f"  25th pct: {p25:.6f}")
+    print(f"  Median: {p50:.6f}")
+    print(f"  75th pct: {p75:.6f}")
+    print(f"  90th pct: {p90:.6f}")
+    print(f"  95th pct: {p95:.6f}")
+    print(f"  Max: {max_err:.6f}")
+    print(f"  Mean: {mean_err:.6f}\n")
 
 def main():
     parser = argparse.ArgumentParser(description="Train an LSTM Autoencoder with IG, store anomalies + explanations in CSV.")
-    parser.add_argument("--input-file", type=str, required=True, help="Path to preprocessed CSV file.")
-    parser.add_argument("--seq-length", type=int, default=20, help="Sliding window size (sequence length).")
+    parser.add_argument("--input_file", type=str, required=True, help="Path to preprocessed CSV file.")
+    parser.add_argument("--seq_length", type=int, default=20, help="Sliding window size (sequence length).")
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs.")
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for training.")
-    parser.add_argument("--save-dir", type=str, default="models/lstm_autoencoder", help="Where to save the model.")
-    parser.add_argument("--threshold-percentile", type=float, default=95.0,
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training.")
+    parser.add_argument("--save_dir", type=str, default="models/lstm_autoencoder", help="Where to save the model.")
+    parser.add_argument("--threshold_percentile", type=float, default=95.0,
                         help="Percentile for choosing anomaly threshold from validation errors.")
     args = parser.parse_args()
 
     Path(args.save_dir).mkdir(parents=True, exist_ok=True)
 
+    # 1) Load data
     print(f"Loading CSV from {args.input_file} ...")
     df = pd.read_csv(args.input_file)
     print(f"Data shape: {df.shape}")
-    feature_names = df.columns.tolist()
+    feature_names = df.columns.tolist()  # keep track of feature names
 
     data_array = df.values.astype("float32")
 
+    # 2) Create sequences
     print("Creating sliding window sequences ...")
     sequences, indexes = create_sequences(data_array, seq_length=args.seq_length)
     print(f"Sequences shape: {sequences.shape}")
 
+    # 3) Simple train/validation split
     train_size = int(0.8 * len(sequences))
     X_train = sequences[:train_size]
     X_val = sequences[train_size:] if train_size < len(sequences) else sequences[:1]
 
-    autoencoder = SimpleLSTMAutoencoder(seq_length=args.seq_length, num_features=data_array.shape[1])
+    # 4) Initialize LSTM autoencoder
+    num_features = data_array.shape[1]
+    autoencoder = SimpleLSTMAutoencoder(seq_length=args.seq_length, num_features=num_features)
     model = autoencoder.model
 
     model.summary()
     model.compile(optimizer="adam", loss="mse")
 
+    # 5) Train with callbacks
     best_model_path = os.path.join(args.save_dir, "best_model.h5")
-    best_model_keras_path = os.path.join(args.save_dir, "best_model.keras")
     callbacks = [
         EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True, verbose=1),
-        ModelCheckpoint(filepath=best_model_path, monitor="val_loss", save_best_only=True, verbose=1),
-        ModelCheckpoint(filepath=best_model_keras_path, monitor="val_loss", save_best_only=True, verbose=1)
+        ModelCheckpoint(filepath=best_model_path, monitor="val_loss", save_best_only=True, verbose=1)
     ]
 
     print("Starting training ...")
@@ -116,34 +151,42 @@ def main():
         shuffle=True
     )
 
+    # Reload best model
     print(f"Loading best model from {best_model_path} ...")
     model.load_weights(best_model_path)
 
+    # Compute reconstruction errors on training set
     recon_train = model.predict(X_train, verbose=0)
     train_errors = np.mean(np.mean(np.square(recon_train - X_train), axis=2), axis=1)
     print_error_summary(train_errors, label="Training set")
 
+    # 6) Compute threshold from validation set
     if len(X_val) < 1:
+        # Fallback if we have no val set
         print("Warning: No validation set. Using a default threshold=0.5")
         threshold = 0.5
         val_errors = []
     else:
+        # Predict reconstruction for val
         recon_val = model.predict(X_val, verbose=0)
         val_errors = np.mean(np.mean(np.square(recon_val - X_val), axis=2), axis=1)
         print_error_summary(val_errors, label="Validation set")
         threshold = np.percentile(val_errors, args.threshold_percentile)
     print(f"Chosen anomaly threshold={threshold:.4f} (percentile={args.threshold_percentile})")
 
+    # Save threshold to a text file
     threshold_file_path = os.path.join(args.save_dir, "threshold.txt")
     with open(threshold_file_path, "w") as f:
         f.write(str(threshold))
     print(f"Threshold saved to: {threshold_file_path}")
 
+    # 7) Evaluate entire dataset => detect anomalies => compute IG => store CSV
     print("Evaluating entire dataset for anomalies + integrated gradients...")
     recon_all = model.predict(sequences, verbose=0)
     errors_all = np.mean(np.mean(np.square(recon_all - sequences), axis=2), axis=1)
     is_anomaly = errors_all > threshold
 
+    # Prepare final DataFrame
     results_df = df.copy()
     results_df["recon_error"] = 0.0
     results_df["is_anomaly"] = 0
@@ -155,6 +198,7 @@ def main():
     total_sequences = len(indexes)
 
     for seq_idx, end_idx in enumerate(indexes):
+        # Print percentage progress
         pct = 100.0 * (seq_idx + 1) / total_sequences
         print(f"Computing explanations: {seq_idx+1}/{total_sequences} ({pct:.2f}%)", end="\r", flush=True)
 
@@ -162,31 +206,43 @@ def main():
         results_df.at[end_idx, "recon_error"] = err
         if is_anomaly[seq_idx]:
             results_df.at[end_idx, "is_anomaly"] = 1
+            # compute integrated gradients
             seq_3d = sequences[seq_idx:seq_idx+1]
             ig_attribs = autoencoder.compute_integrated_gradients(seq_3d)
 
+            # sum across time dimension => shape(num_features,)
             ig_summed = ig_attribs.sum(axis=0)
+
             pos_sum = float(ig_summed[ig_summed > 0].sum())
             neg_sum = float(ig_summed[ig_summed < 0].sum())
             results_df.at[end_idx, "pos_sum"] = pos_sum
             results_df.at[end_idx, "neg_sum"] = neg_sum
 
+            # build dict of feature->IG
+            import json
             ig_dict = {}
             for i, feat_name in enumerate(feature_names):
                 ig_dict[feat_name] = float(ig_summed[i])
 
+            # convert to JSON
             ig_json = json.dumps(ig_dict)
             results_df.at[end_idx, "ig_explanation"] = ig_json
 
+            # Also pick top 5 by absolute IG
             sorted_ig = sorted(ig_dict.items(), key=lambda x: abs(x[1]), reverse=True)
             top_5 = sorted_ig[:5]
             top_5_str_parts = [f"{k}={v:.3f}" for (k, v) in top_5]
             top_5_str = "; ".join(top_5_str_parts)
             results_df.at[end_idx, "most_important_features"] = top_5_str
 
-    final_model_path = os.path.join(args.save_dir, "model.h5")
-    model.save(final_model_path)
-    print(f"\nFinal model saved to: {final_model_path}")
+    # 8) Save final model & CSV
+    final_model_h5_path = os.path.join(args.save_dir, "model.h5")
+    final_model_keras_path = os.path.join(args.save_dir, "model.keras")
+    
+    # Save in both formats
+    model.save(final_model_h5_path, save_format='h5')
+    model.save(final_model_keras_path, save_format='keras')
+    print(f"\nFinal model saved to: {final_model_h5_path} and {final_model_keras_path}")
 
     output_csv_path = os.path.join(args.save_dir, "lstm_anomaly_explanations.csv")
     results_df.to_csv(output_csv_path, index=False)
